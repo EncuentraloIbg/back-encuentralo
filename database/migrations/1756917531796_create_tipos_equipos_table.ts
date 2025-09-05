@@ -1,0 +1,20 @@
+import { BaseSchema } from '@adonisjs/lucid/schema'
+
+export default class TiposEquipo extends BaseSchema {
+  protected tableName = 'tipos_equipo'
+
+  async up() {
+    this.schema.createTable(this.tableName, (table) => {
+      table.increments('id').primary()
+      table.string('nombre', 60).notNullable().unique()
+      table.boolean('activo').notNullable().defaultTo(true)
+
+      table.timestamp('created_at', { useTz: true }).notNullable()
+      table.timestamp('updated_at', { useTz: true }).notNullable()
+    })
+  }
+
+  async down() {
+    this.schema.dropTable(this.tableName)
+  }
+}

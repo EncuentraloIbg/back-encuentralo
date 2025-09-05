@@ -1,90 +1,82 @@
+// app/controllers/auth_controller.ts
 import type { HttpContext } from '@adonisjs/core/http'
-import Usuario from '#models/usuarios'
-import hash from '@adonisjs/core/services/hash'
+import Usuario from '#models/usuario'
+import Hash from '@adonisjs/core/services/hash'
 import PasswordReset from '#models/password_reset'
 import { DateTime } from 'luxon'
 import mail from '@adonisjs/mail/services/main'
 import crypto from 'node:crypto'
 
 export default class AuthController {
+  /** Login: devuelve bearer + user */
   public async login({ request, response }: HttpContext) {
-    const { correo, password } = request.only(['correo', 'password'])
+    const rawEmail = String(request.input('correo') || '')
+    const rawPassword = String(request.input('password') || '')
+    const correo = rawEmail.trim().toLowerCase()
+    const password = rawPassword.trim()
+
+    if (!correo || !password) {
+      return response.badRequest({ message: 'correo y password son requeridos' })
+    }
 
     try {
-      const user = await Usuario.query()
-        .where('correo', correo)
-        .preload('rol') // <--- CARGA la relación aquí
-        .first()
-
+      const user = await Usuario.query().where('correo', correo).first()
       if (!user) {
         return response.unauthorized({ message: 'Correo o contraseña inválidos' })
       }
 
-      const cleanPassword = typeof password === 'string' ? password.trim() : ''
-      const isPasswordValid = await hash.verify(user.password, cleanPassword)
+      if (user.estado && user.estado !== 'activo') {
+        return response.forbidden({ message: 'Usuario inactivo' })
+      }
 
-      if (!isPasswordValid) {
+      // Verificación con el mismo driver (scrypt)
+      const ok = await Hash.use('scrypt').verify(user.password, password)
+      if (!ok) {
         return response.unauthorized({ message: 'Correo o contraseña inválidos' })
       }
 
       const token = await Usuario.accessTokens.create(user)
 
-      // Usamos serialize para enviar también el rol
-      const userData = user.serialize()
-
-      userData.profilePictureUrl = user.foto_perfil
-
-      console.log('User data:', userData)
-
       return {
         type: 'bearer',
-        token: token,
-        user: userData, // Ahora incluye role: { id, nombre, ... }
+        token: token.value, // string listo para el front
+        user: user.serialize(), // password oculto por serializeAs: null
       }
-    } catch (error) {
-      console.error('Error en login:', error)
+    } catch {
       return response.internalServerError({ message: 'Error interno del servidor' })
     }
   }
 
+  /** Forgot password: genera token y envía enlace /new-password/:token */
   public async forgotPassword({ request, response }: HttpContext) {
-    const correo = request.input('correo')
-    console.log('>>> LLEGÓ petición a forgotPassword, correo:', correo)
+    const correo = String(request.input('correo') || '')
+      .trim()
+      .toLowerCase()
+    if (!correo) return response.badRequest({ message: 'correo es requerido' })
 
-    // Verifica que el usuario exista
     const user = await Usuario.findBy('correo', correo)
-    console.log('>>> Usuario encontrado:', user ? user.id : 'no existe')
     if (!user) {
+      // Podrías responder 200 para no revelar existencia; aquí dejamos feedback explícito
       return response.badRequest({ message: 'El correo no está registrado.' })
     }
 
-    // Generar un token único
     const token = crypto.randomBytes(32).toString('hex')
     const expiresAt = DateTime.now().plus({ hours: 1 })
 
-    // Elimina tokens anteriores (opcional pero recomendado)
     await PasswordReset.query().where('correo', correo).delete()
+    await PasswordReset.create({ correo, token, expiresAt })
 
-    // Guardar nuevo token
-    await PasswordReset.create({
-      correo: correo,
-      token,
-      expiresAt,
-    })
+    const enlace = `http://localhost:5173/new-password/${token}`
 
-    // Enviar correo con enlace
     await mail.send((message) => {
-      const enlace = `http://localhost:5173/new-password/${token}`
-
-      message.to(correo).from('criferdel10@gmail.com', 'TuApp').subject('Restablece tu contraseña')
+      message.to(correo).from('no-reply@tuapp.com', 'TuApp').subject('Restablece tu contraseña')
         .html(`
           <h2>Hola,</h2>
           <p>Recibimos una solicitud para restablecer tu contraseña.</p>
           <p>Haz clic en el siguiente enlace para crear una nueva contraseña:</p>
-          <a href="${enlace}" style="display:inline-block; margin-top:1rem; padding:0.75rem 1.5rem; background:#4f46e5; color:#fff; text-decoration:none; border-radius:4px;">Restablecer contraseña</a>
-          <p>Este enlace expirará el <strong>${expiresAt}</strong>.</p>
+          <a href="${enlace}" style="display:inline-block;margin-top:1rem;padding:0.75rem 1.5rem;background:#4f46e5;color:#fff;text-decoration:none;border-radius:4px;">Restablecer contraseña</a>
+          <p>Este enlace expira el <strong>${expiresAt.toFormat('yyyy-LL-dd HH:mm')}</strong>.</p>
           <p>Si no solicitaste este cambio, puedes ignorar este correo.</p>
-          <p style="margin-top:2rem; color:#777; font-size:0.875rem;">Gracias,<br/>El equipo de TuApp</p>
         `)
     })
 
@@ -93,30 +85,35 @@ export default class AuthController {
     })
   }
 
+  /** Reset password: valida token no expirado y actualiza password (hook hashea con scrypt) */
   public async resetPassword({ request, response }: HttpContext) {
-    const { token, password } = request.only(['token', 'password'])
+    const token = String(request.input('token') || '')
+    const newPassword = String(request.input('password') || '')
 
-    // Buscar token en la tabla
+    if (!token || !newPassword) {
+      return response.badRequest({ message: 'token y password son requeridos' })
+    }
+    if (newPassword.length < 6) {
+      return response.badRequest({ message: 'La contraseña debe tener al menos 6 caracteres' })
+    }
+
     const resetRecord = await PasswordReset.query()
       .where('token', token)
-      .andWhere('expiresAt', '>', DateTime.now().toJSDate())
+      .andWhere('expires_at', '>', DateTime.now().toJSDate())
       .first()
 
     if (!resetRecord) {
       return response.badRequest({ message: 'El token es inválido o ha expirado.' })
     }
 
-    // Buscar usuario asociado al correo
     const user = await Usuario.findBy('correo', resetRecord.correo)
     if (!user) {
       return response.badRequest({ message: 'Usuario no encontrado.' })
     }
 
-    // Actualizar contraseña
-    user.password = password // Se hashéa automáticamente si tu modelo está configurado así
+    // Asignar en claro: el hook del modelo lo hashea con scrypt al guardar
+    user.password = newPassword
     await user.save()
-
-    // Eliminar el token después del uso
     await resetRecord.delete()
 
     return response.ok({ message: 'La contraseña se actualizó correctamente.' })
