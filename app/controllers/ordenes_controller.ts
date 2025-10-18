@@ -18,12 +18,70 @@ function buildCodigo(prefijo: string, consecutivo: number, pad: number = 6) {
   return `${prefijo}-${String(consecutivo).padStart(pad, '0')}`
 }
 
+/** ✅ ID entero y positivo */
+function parseIdOrFail(raw: unknown): number {
+  const id = Number(raw)
+  if (!Number.isSafeInteger(id) || id <= 0) throw new Error('INVALID_ID')
+  return id
+}
+
+/** ✅ Normaliza URL (agrega "/" si es relativa) */
+function normalizeUrl(u: string): string {
+  const s = String(u ?? '').trim()
+  if (!s) return s
+  if (/^https?:\/\//i.test(s)) return s
+  return s.startsWith('/') ? s : `/${s}`
+}
+
+/** ✅ Mapea a tipoCliente válido */
+function toTipoCliente(raw: unknown): 'persona' | 'empresa' | null {
+  const v = String(raw ?? '')
+    .trim()
+    .toLowerCase()
+  if (v === 'persona' || v === 'empresa') return v
+  return null
+}
+
 export default class OrdenesController {
+  /* ====== Siguiente consecutivo por RS ====== */
+  public async nextConsecutivo({ request, response }: HttpContext) {
+    const rsIdRaw = request.input('razon_social_id')
+    const rsId = Number(rsIdRaw)
+    if (!Number.isSafeInteger(rsId) || rsId <= 0) {
+      return response.badRequest({ message: 'razon_social_id inválido' })
+    }
+
+    const rs = await RazonSocial.find(rsId)
+    if (!rs || !rs.activo) {
+      return response.badRequest({ message: 'Razón social inválida o inactiva' })
+    }
+
+    const row = await db
+      .from('ordenes')
+      .where('razon_social_id', rsId)
+      .max('consecutivo as maxConsecutivo')
+      .first()
+
+    const maxConsecutivo = Number(row?.maxConsecutivo ?? 0)
+    const siguiente = maxConsecutivo + 1
+    const codigoPreview = buildCodigo(rs.prefijoOrden!, siguiente)
+
+    return response.ok({
+      razon_social_id: rsId,
+      prefijo: rs.prefijoOrden,
+      siguiente,
+      // mantenemos snake_case en la respuesta para compatibilidad
+      codigo_preview: codigoPreview,
+    })
+  }
+
+  /* ====== Crear orden ====== */
   public async store({ request, response, auth }: HttpContext) {
     const razonSocialId = Number(request.input('razon_social_id'))
     const clientePayload = request.input('cliente') || {}
     const equipoPayload = request.input('equipo') || {}
     const ordenPayload = request.input('orden') || {}
+
     if (!razonSocialId || Number.isNaN(razonSocialId))
       return response.badRequest({ message: 'razon_social_id inválido' })
     if (!clientePayload?.documento || !clientePayload?.nombre)
@@ -49,12 +107,13 @@ export default class OrdenesController {
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       const trx = await db.transaction()
       try {
+        // ===== Cliente: find-or-create
         const documento = String(clientePayload.documento).trim()
-        let cliente = await Cliente.query()
-          .useTransaction(trx)
+        let cliente = await Cliente.query({ client: trx })
           .where('razon_social_id', razonSocialId)
           .andWhere('documento', documento)
           .first()
+
         if (!cliente) {
           cliente = new Cliente()
           cliente.useTransaction(trx)
@@ -65,7 +124,11 @@ export default class OrdenesController {
           cliente.correo = clientePayload.correo
             ? String(clientePayload.correo).trim().toLowerCase()
             : ''
-          cliente.whatsappOptIn = false
+          cliente.whatsappOptIn = Boolean(clientePayload.whatsapp_opt_in ?? false)
+          cliente.direccion = clientePayload.direccion
+            ? String(clientePayload.direccion).trim()
+            : null
+          cliente.tipoCliente = toTipoCliente(clientePayload.tipo_cliente)
           await cliente.save()
         } else {
           cliente.useTransaction(trx)
@@ -78,15 +141,32 @@ export default class OrdenesController {
             clientePayload.correo !== undefined
               ? String(clientePayload.correo).trim().toLowerCase()
               : cliente.correo
+          cliente.whatsappOptIn =
+            clientePayload.whatsapp_opt_in !== undefined
+              ? Boolean(clientePayload.whatsapp_opt_in)
+              : cliente.whatsappOptIn
+          cliente.direccion =
+            clientePayload.direccion !== undefined
+              ? clientePayload.direccion !== null
+                ? String(clientePayload.direccion).trim()
+                : null
+              : cliente.direccion
+          cliente.tipoCliente =
+            clientePayload.tipo_cliente !== undefined
+              ? clientePayload.tipo_cliente !== null
+                ? toTipoCliente(clientePayload.tipo_cliente)
+                : null
+              : cliente.tipoCliente
           await cliente.save()
         }
 
+        // ===== Equipo: find-or-create por cliente + serie_imei
         const serie = String(equipoPayload.serie_imei).trim()
-        let equipo = await Equipo.query()
-          .useTransaction(trx)
+        let equipo = await Equipo.query({ client: trx })
           .where('cliente_id', cliente.id!)
           .andWhere('serie_imei', serie)
           .first()
+
         if (!equipo) {
           equipo = new Equipo()
           equipo.useTransaction(trx)
@@ -110,6 +190,7 @@ export default class OrdenesController {
           await equipo.save()
         }
 
+        // ===== Consecutivo por RS (MAX+1)
         const rows = await trx
           .from('ordenes')
           .where('razon_social_id', razonSocialId)
@@ -120,20 +201,22 @@ export default class OrdenesController {
         const consecutivo = maxConsecutivo + 1
         const codigo = buildCodigo(prefijo, consecutivo)
 
+        // ===== Método de pago (opcional)
         let metodoPagoId: number | null = null
         if (ordenPayload?.metodo_pago_id) {
-          const mp = await MetodoPago.query()
-            .useTransaction(trx)
+          const mp = await MetodoPago.query({ client: trx })
             .where('id', Number(ordenPayload.metodo_pago_id))
             .first()
           if (!mp || !mp.activo) throw new Error('Método de pago inválido o inactivo')
           metodoPagoId = mp.id!
         }
 
+        // ===== Fecha entrega acordada (opcional)
         const fechaEntregaAcordada = ordenPayload?.fecha_entrega_acordada
           ? DateTime.fromISO(String(ordenPayload.fecha_entrega_acordada))
           : null
 
+        // ===== Crear Orden
         const orden = new Orden()
         orden.useTransaction(trx)
         orden.razonSocialId = razonSocialId
@@ -170,6 +253,7 @@ export default class OrdenesController {
         orden.fechaEntregaAcordada = fechaEntregaAcordada
         await orden.save()
 
+        // ===== Historial: recibido
         const historial = new OrdenHistorial()
         historial.useTransaction(trx)
         historial.ordenId = orden.id!
@@ -177,19 +261,25 @@ export default class OrdenesController {
         historial.usuarioId = userId
         await historial.save()
 
+        // ===== Accesorios
         const accesoriosIn = (request.input('accesorios') as Array<any>) || []
         if (Array.isArray(accesoriosIn) && accesoriosIn.length > 0) {
+          const seen = new Set<number>()
           for (const a of accesoriosIn) {
-            if (!a || !a.accesorio_id) continue
+            const accId = Number(a?.accesorio_id)
+            if (!accId || seen.has(accId)) continue
+            seen.add(accId)
+
             const oa = new OrdenAccesorio()
             oa.useTransaction(trx)
             oa.ordenId = orden.id!
-            oa.accesorioId = Number(a.accesorio_id)
+            oa.accesorioId = accId
             oa.detalle = a.detalle ? String(a.detalle) : null
             await oa.save()
           }
         }
 
+        // ===== Fotos (por URL)
         const fotosIn = (request.input('fotos') as Array<any>) || []
         if (Array.isArray(fotosIn) && fotosIn.length > 0) {
           for (const f of fotosIn) {
@@ -197,12 +287,13 @@ export default class OrdenesController {
             const ofo = new OrdenFoto()
             ofo.useTransaction(trx)
             ofo.ordenId = orden.id!
-            ofo.url = String(f.url)
+            ofo.url = normalizeUrl(String(f.url))
             ofo.descripcion = f.descripcion ? String(f.descripcion) : null
             await ofo.save()
           }
         }
 
+        // ===== Archivos (por URL)
         const archivosIn = (request.input('archivos') as Array<any>) || []
         if (Array.isArray(archivosIn) && archivosIn.length > 0) {
           for (const f of archivosIn) {
@@ -210,7 +301,7 @@ export default class OrdenesController {
             const oa = new OrdenArchivo()
             oa.useTransaction(trx)
             oa.ordenId = orden.id!
-            oa.url = String(f.url)
+            oa.url = normalizeUrl(String(f.url))
             oa.nombreArchivo = String(f.nombre_archivo)
             oa.tipo = String(f.tipo)
             await oa.save()
@@ -234,6 +325,7 @@ export default class OrdenesController {
             .includes('duplicate')
         )
           continue
+
         return response.internalServerError({
           message: 'No fue posible crear la orden',
           error: String(err?.message || err),
@@ -247,6 +339,7 @@ export default class OrdenesController {
     })
   }
 
+  /* ====== Listado paginado ====== */
   public async index({ request, response }: HttpContext) {
     const estado = request.input('estado') as OrdenEstado | undefined
     const rsId = request.input('razon_social_id')
@@ -254,10 +347,15 @@ export default class OrdenesController {
       : undefined
     const fechaDesde = request.input('fecha_desde')
     const fechaHasta = request.input('fecha_hasta')
+    const qText = String(request.input('q') ?? request.input('search') ?? '').trim()
+
     const page = Number(request.input('page') || 1)
     const perPage = Math.min(Number(request.input('perPage') || 20), 100)
 
-    const q = Orden.query()
+    const query = Orden.query()
+      .select(['id', 'codigo', 'estado', 'created_at', 'cliente_id', 'razon_social_id'])
+      .preload('cliente', (c) => c.select(['id', 'nombre', 'documento']))
+      .preload('razonSocial', (r) => r.select(['id', 'nombre']))
       .if(estado, (qb) => qb.where('estado', estado!))
       .if(rsId, (qb) => qb.where('razon_social_id', rsId!))
       .if(fechaDesde || fechaHasta, (qb) => {
@@ -267,32 +365,79 @@ export default class OrdenesController {
         else if (desde) qb.where('created_at', '>=', desde.toSQL()!)
         else if (hasta) qb.where('created_at', '<=', hasta.toSQL()!)
       })
+      .if(qText, (qb) =>
+        qb.where((w) => {
+          w.whereILike('codigo', `%${qText}%`).orWhereHas('cliente', (c) =>
+            c.whereILike('nombre', `%${qText}%`).orWhereILike('documento', `%${qText}%`)
+          )
+        })
+      )
       .orderBy('id', 'desc')
 
-    const result = await q.paginate(page, perPage)
-    return response.ok(result)
+    const result = await query.paginate(page, perPage)
+
+    const data = result.all().map((o) => {
+      const c = (o.$preloaded?.cliente as Cliente | undefined) ?? undefined
+      const rs = (o.$preloaded?.razonSocial as RazonSocial | undefined) ?? undefined
+      return {
+        id: o.id,
+        ordenId: o.id,
+        codigo: o.codigo,
+        estado: o.estado,
+        createdAt: o.createdAt?.toISO(),
+        cliente_nombre: c?.nombre ?? '',
+        razon_social_nombre: rs?.nombre ?? '',
+        cliente: c
+          ? {
+              id: c.id,
+              nombre: c.nombre,
+              documento: c.documento,
+            }
+          : null,
+        razon_social: rs ? { id: rs.id, nombre: rs.nombre } : null,
+      }
+    })
+
+    return response.ok({
+      meta: result.getMeta(),
+      data,
+    })
   }
 
+  /* ====== Detalle ====== */
   public async show({ params, response }: HttpContext) {
-    const orden = await Orden.query()
-      .where('id', Number(params.id))
-      .preload('razonSocial')
-      .preload('cliente')
-      .preload('equipo')
-      .preload('metodoPago')
-      .preload('motivoEstado')
-      .preload('fotos')
-      .preload('archivos')
-      .preload('historial', (h) => h.preload('motivoEstado').orderBy('id', 'asc'))
-      .preload('accesorios')
-      .first()
+    try {
+      const id = parseIdOrFail(params.id)
+      const orden = await Orden.query()
+        .where('id', id)
+        .preload('razonSocial')
+        .preload('cliente')
+        .preload('equipo')
+        .preload('metodoPago')
+        .preload('motivoEstado')
+        .preload('fotos')
+        .preload('archivos')
+        .preload('historial', (h) => h.preload('motivoEstado').orderBy('id', 'asc'))
+        .preload('accesorios')
+        .first()
 
-    if (!orden) return response.notFound({ message: 'Orden no encontrada' })
-    return response.ok(orden)
+      if (!orden) return response.notFound({ message: 'Orden no encontrada' })
+      return response.ok(orden)
+    } catch {
+      return response.badRequest({ message: 'Parámetro id inválido' })
+    }
   }
 
+  /* ====== Actualizar ====== */
   public async update({ params, request, response }: HttpContext) {
-    const orden = await Orden.find(Number(params.id))
+    let id: number
+    try {
+      id = parseIdOrFail(params.id)
+    } catch {
+      return response.badRequest({ message: 'Parámetro id inválido' })
+    }
+
+    const orden = await Orden.find(id)
     if (!orden) return response.notFound({ message: 'Orden no encontrada' })
 
     const mpId = request.input('metodo_pago_id')
@@ -355,8 +500,16 @@ export default class OrdenesController {
     return response.ok(orden)
   }
 
+  /* ====== Cerrar (entregado/cancelada/rechazada) ====== */
   public async close({ params, request, response, auth }: HttpContext) {
-    const orden = await Orden.find(Number(params.id))
+    let id: number
+    try {
+      id = parseIdOrFail(params.id)
+    } catch {
+      return response.badRequest({ message: 'Parámetro id inválido' })
+    }
+
+    const orden = await Orden.find(id)
     if (!orden) return response.notFound({ message: 'Orden no encontrada' })
 
     const nuevoEstado = String(request.input('estado') || '') as OrdenEstado
@@ -415,53 +568,99 @@ export default class OrdenesController {
     }
   }
 
+  /* ====== Accesorios: agregar o reemplazar ====== */
   public async addAccesorios({ params, request, response }: HttpContext) {
-    const orden = await Orden.find(Number(params.id))
+    let id: number
+    try {
+      id = parseIdOrFail(params.id)
+    } catch {
+      return response.badRequest({ message: 'Parámetro id inválido' })
+    }
+
+    const orden = await Orden.find(id)
     if (!orden) return response.notFound({ message: 'Orden no encontrada' })
+
     const accesoriosIn = (request.input('accesorios') as Array<any>) || []
     if (!Array.isArray(accesoriosIn) || accesoriosIn.length === 0)
       return response.badRequest({ message: 'accesorios vacío' })
+
+    const replace = !!request.input('replace') || request.qs().replace === '1'
+
     const trx = await db.transaction()
     try {
+      if (replace) {
+        await OrdenAccesorio.query({ client: trx }).where('orden_id', orden.id!).delete()
+      }
+
+      const seen = new Set<number>()
       for (const a of accesoriosIn) {
-        if (!a || !a.accesorio_id) continue
+        const accId = Number(a?.accesorio_id)
+        if (!accId || seen.has(accId)) continue
+        seen.add(accId)
+
+        if (!replace) {
+          const exists = await OrdenAccesorio.query({ client: trx })
+            .where('orden_id', orden.id!)
+            .andWhere('accesorio_id', accId)
+            .first()
+          if (exists) continue
+        }
+
         const oa = new OrdenAccesorio()
         oa.useTransaction(trx)
         oa.ordenId = orden.id!
-        oa.accesorioId = Number(a.accesorio_id)
+        oa.accesorioId = accId
         oa.detalle = a.detalle ? String(a.detalle) : null
         await oa.save()
       }
+
       await trx.commit()
-      return response.ok({ message: 'Accesorios agregados' })
+      return response.ok({ message: replace ? 'Accesorios sincronizados' : 'Accesorios agregados' })
     } catch (e: any) {
       await trx.rollback()
       return response.internalServerError({
-        message: 'Error agregando accesorios',
+        message: 'Error guardando accesorios',
         error: String(e?.message || e),
       })
     }
   }
 
+  /* ====== Fotos: agregar o reemplazar ====== */
   public async addFotos({ params, request, response }: HttpContext) {
-    const orden = await Orden.find(Number(params.id))
+    let id: number
+    try {
+      id = parseIdOrFail(params.id)
+    } catch {
+      return response.badRequest({ message: 'Parámetro id inválido' })
+    }
+
+    const orden = await Orden.find(id)
     if (!orden) return response.notFound({ message: 'Orden no encontrada' })
+
     const fotosIn = (request.input('fotos') as Array<any>) || []
     if (!Array.isArray(fotosIn) || fotosIn.length === 0)
       return response.badRequest({ message: 'fotos vacío' })
+
+    const replace = !!request.input('replace') || request.qs().replace === '1'
+
     const trx = await db.transaction()
     try {
+      if (replace) {
+        await OrdenFoto.query({ client: trx }).where('orden_id', orden.id!).delete()
+      }
+
       for (const f of fotosIn) {
         if (!f || !f.url) continue
         const ofo = new OrdenFoto()
         ofo.useTransaction(trx)
         ofo.ordenId = orden.id!
-        ofo.url = String(f.url)
+        ofo.url = normalizeUrl(String(f.url))
         ofo.descripcion = f.descripcion ? String(f.descripcion) : null
         await ofo.save()
       }
+
       await trx.commit()
-      return response.ok({ message: 'Fotos agregadas' })
+      return response.ok({ message: replace ? 'Fotos sincronizadas' : 'Fotos agregadas' })
     } catch (e: any) {
       await trx.rollback()
       return response.internalServerError({
@@ -471,26 +670,43 @@ export default class OrdenesController {
     }
   }
 
+  /* ====== Archivos: agregar o reemplazar ====== */
   public async addArchivos({ params, request, response }: HttpContext) {
-    const orden = await Orden.find(Number(params.id))
+    let id: number
+    try {
+      id = parseIdOrFail(params.id)
+    } catch {
+      return response.badRequest({ message: 'Parámetro id inválido' })
+    }
+
+    const orden = await Orden.find(id)
     if (!orden) return response.notFound({ message: 'Orden no encontrada' })
+
     const archivosIn = (request.input('archivos') as Array<any>) || []
     if (!Array.isArray(archivosIn) || archivosIn.length === 0)
       return response.badRequest({ message: 'archivos vacío' })
+
+    const replace = !!request.input('replace') || request.qs().replace === '1'
+
     const trx = await db.transaction()
     try {
+      if (replace) {
+        await OrdenArchivo.query({ client: trx }).where('orden_id', orden.id!).delete()
+      }
+
       for (const f of archivosIn) {
         if (!f || !f.url || !f.nombre_archivo || !f.tipo) continue
         const oa = new OrdenArchivo()
         oa.useTransaction(trx)
         oa.ordenId = orden.id!
-        oa.url = String(f.url)
+        oa.url = normalizeUrl(String(f.url))
         oa.nombreArchivo = String(f.nombre_archivo)
         oa.tipo = String(f.tipo)
         await oa.save()
       }
+
       await trx.commit()
-      return response.ok({ message: 'Archivos agregados' })
+      return response.ok({ message: replace ? 'Archivos sincronizados' : 'Archivos agregados' })
     } catch (e: any) {
       await trx.rollback()
       return response.internalServerError({
@@ -498,5 +714,55 @@ export default class OrdenesController {
         error: String(e?.message || e),
       })
     }
+  }
+
+  /** ====== Historial (paginado + filtros) ====== */
+  public async historial({ request, response }: HttpContext) {
+    const page = Math.max(1, Number(request.input('page') ?? 1))
+    const perPage = Math.min(100, Number(request.input('perPage') ?? request.input('limit') ?? 10))
+    const q = String(request.input('q') ?? request.input('search') ?? '').trim()
+    const estado = request.input('estado') as OrdenEstado | undefined
+    const rsId = request.input('razon_social_id')
+      ? Number(request.input('razon_social_id'))
+      : undefined
+
+    const query = OrdenHistorial.query()
+      .preload('orden', (o) => {
+        o.preload('cliente')
+        o.preload('razonSocial')
+      })
+      .if(estado, (qb) => qb.where('estado', estado!))
+      .if(rsId, (qb) =>
+        qb.whereHas('orden', (oq) => {
+          oq.where('razon_social_id', rsId!)
+        })
+      )
+      .if(q, (qb) =>
+        qb.where((w) => {
+          w.whereHas('orden', (oq) => oq.whereILike('codigo', `%${q}%`)).orWhereHas('orden', (oq) =>
+            oq.whereHas('cliente', (cq) =>
+              cq.whereILike('nombre', `%${q}%`).orWhereILike('documento', `%${q}%`)
+            )
+          )
+        })
+      )
+      .orderBy('id', 'desc')
+
+    const result = await query.paginate(page, perPage)
+
+    const data = result.all().map((h) => ({
+      id: h.id,
+      estado: h.estado as OrdenEstado,
+      createdAt: h.createdAt?.toISO(),
+      ordenId: h.ordenId,
+      codigo: h.orden?.codigo ?? '',
+      razonSocial: h.orden?.razonSocial?.nombre ?? '',
+      clienteNombre: h.orden?.cliente?.nombre ?? '',
+    }))
+
+    return response.ok({
+      meta: result.getMeta(),
+      data,
+    })
   }
 }

@@ -1,3 +1,4 @@
+// app/models/equipo.ts
 import { DateTime } from 'luxon'
 import { BaseModel, column, belongsTo, hasMany } from '@adonisjs/lucid/orm'
 import type { BelongsTo, HasMany } from '@adonisjs/lucid/types/relations'
@@ -11,40 +12,50 @@ export default class Equipo extends BaseModel {
   public static primaryKey = 'id'
 
   @column({ isPrimary: true })
-  declare public id: number
+  declare id: number
 
   @column({ columnName: 'cliente_id' })
-  declare public clienteId: number
+  declare clienteId: number
 
   @column({ columnName: 'tipo_equipo_id' })
-  declare public tipoEquipoId: number
+  declare tipoEquipoId: number
 
   @column()
-  declare public marca: string
+  declare marca: string
 
   @column()
-  declare public modelo: string
+  declare modelo: string
 
   @column({ columnName: 'serie_imei' })
-  declare public serieImei: string
+  declare serieImei: string
 
+  // Extras opcionales
+  @column({ columnName: 'so_version' })
+  declare soVersion: string | null
+
+  @column({ columnName: 'ram_gb' })
+  declare ramGb: number | null
+
+  @column({ columnName: 'disco_gb' })
+  declare discoGb: number | null
+
+  // Campo libre usado por el controlador / UI
   @column()
-  declare public specs: string | null
+  declare specs: string | null
 
   @column.dateTime({ autoCreate: true, serializeAs: 'created_at' })
-  declare public createdAt: DateTime
+  declare createdAt: DateTime
 
   @column.dateTime({ autoCreate: true, autoUpdate: true, serializeAs: 'updated_at' })
-  declare public updatedAt: DateTime
+  declare updatedAt: DateTime
 
   /** Relaciones */
-
   @belongsTo(() => Cliente, { foreignKey: 'clienteId' })
-  declare public cliente: BelongsTo<typeof Cliente>
+  declare cliente: BelongsTo<typeof Cliente>
 
   @belongsTo(() => TipoEquipo, { foreignKey: 'tipoEquipoId' })
-  declare public tipoEquipo: BelongsTo<typeof TipoEquipo>
+  declare tipoEquipo: BelongsTo<typeof TipoEquipo>
 
   @hasMany(() => Orden, { foreignKey: 'equipoId' })
-  declare public ordenes: HasMany<typeof Orden>
+  declare ordenes: HasMany<typeof Orden>
 }

@@ -12,40 +12,46 @@ export default class Cliente extends BaseModel {
   public static primaryKey = 'id'
 
   @column({ isPrimary: true })
-  declare public id: number
+  declare id: number
 
   @column({ columnName: 'razon_social_id' })
-  declare public razonSocialId: number
+  declare razonSocialId: number
+
+  // 🔹 Campos esperados por el controlador
+  @column()
+  declare nombre: string
 
   @column()
-  declare public nombre: string
+  declare documento: string
 
   @column()
-  declare public documento: string
+  declare telefono: string
 
   @column()
-  declare public telefono: string
-
-  @column()
-  declare public correo: string
+  declare correo: string | null
 
   @column({ columnName: 'whatsapp_opt_in' })
-  declare public whatsappOptIn: boolean
+  declare whatsappOptIn: boolean
+
+  @column()
+  declare direccion: string | null
+
+  @column({ columnName: 'tipo_cliente' })
+  declare tipoCliente: 'persona' | 'empresa' | null
 
   @column.dateTime({ autoCreate: true, serializeAs: 'created_at' })
-  declare public createdAt: DateTime
+  declare createdAt: DateTime
 
   @column.dateTime({ autoCreate: true, autoUpdate: true, serializeAs: 'updated_at' })
-  declare public updatedAt: DateTime
+  declare updatedAt: DateTime
 
   /** Relaciones */
-
   @belongsTo(() => RazonSocial, { foreignKey: 'razonSocialId' })
-  declare public razonSocial: BelongsTo<typeof RazonSocial>
+  declare razonSocial: BelongsTo<typeof RazonSocial>
 
   @hasMany(() => Equipo, { foreignKey: 'clienteId' })
-  declare public equipos: HasMany<typeof Equipo>
+  declare equipos: HasMany<typeof Equipo>
 
   @hasMany(() => Orden, { foreignKey: 'clienteId' })
-  declare public ordenes: HasMany<typeof Orden>
+  declare ordenes: HasMany<typeof Orden>
 }

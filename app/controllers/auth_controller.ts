@@ -8,12 +8,44 @@ import mail from '@adonisjs/mail/services/main'
 import crypto from 'node:crypto'
 
 export default class AuthController {
-  /** Login: devuelve bearer + user */
+  /**
+   * GET /api/v1/me
+   * 🔓 MODO DEV SIN AUTENTICACIÓN:
+   *   - Devuelve SIEMPRE el primer usuario (con su razón social) sin exigir Bearer token.
+   *   - Úsalo para trabajar cómodo en front. No lo dejes así en producción.
+   */
+  public async me({ response }: HttpContext) {
+    const user = await Usuario.query()
+      .preload('razonSocial')
+      .orderBy('id', 'asc')
+      .first()
+
+    if (!user) return response.ok({ user: null })
+
+    return response.ok({
+      user: {
+        id: user.id,
+        nombres: user.nombres,
+        apellidos: user.apellidos,
+        correo: user.correo,
+        telefono: user.telefono,
+        direccion: user.direccion,
+        estado: user.estado,
+        // importante para el sidebar/foto de perfil:
+        avatar_url: user.avatarUrl, // ← el front espera snake_case
+        razon_social: user.razonSocial
+          ? { id: user.razonSocial.id, nombre: user.razonSocial.nombre }
+          : null,
+        created_at: user.createdAt?.toISO(),
+        updated_at: user.updatedAt?.toISO(),
+      },
+    })
+  }
+
+  /** POST /api/v1/login */
   public async login({ request, response }: HttpContext) {
-    const rawEmail = String(request.input('correo') || '')
-    const rawPassword = String(request.input('password') || '')
-    const correo = rawEmail.trim().toLowerCase()
-    const password = rawPassword.trim()
+    const correo = String(request.input('correo') || '').trim().toLowerCase()
+    const password = String(request.input('password') || '').trim()
 
     if (!correo || !password) {
       return response.badRequest({ message: 'correo y password son requeridos' })
@@ -21,44 +53,45 @@ export default class AuthController {
 
     try {
       const user = await Usuario.query().where('correo', correo).first()
-      if (!user) {
-        return response.unauthorized({ message: 'Correo o contraseña inválidos' })
-      }
+      if (!user) return response.unauthorized({ message: 'Correo o contraseña inválidos' })
 
       if (user.estado && user.estado !== 'activo') {
         return response.forbidden({ message: 'Usuario inactivo' })
       }
 
-      // Verificación con el mismo driver (scrypt)
       const ok = await Hash.use('scrypt').verify(user.password, password)
-      if (!ok) {
-        return response.unauthorized({ message: 'Correo o contraseña inválidos' })
-      }
+      if (!ok) return response.unauthorized({ message: 'Correo o contraseña inválidos' })
 
       const token = await Usuario.accessTokens.create(user)
 
-      return {
+      return response.ok({
         type: 'bearer',
-        token: token.value, // string listo para el front
-        user: user.serialize(), // password oculto por serializeAs: null
-      }
+        token: token.value,
+        user: {
+          id: user.id,
+          nombres: user.nombres,
+          apellidos: user.apellidos,
+          correo: user.correo,
+          telefono: user.telefono,
+          direccion: user.direccion,
+          estado: user.estado,
+          avatar_url: user.avatarUrl,
+          created_at: user.createdAt?.toISO(),
+          updated_at: user.updatedAt?.toISO(),
+        },
+      })
     } catch {
       return response.internalServerError({ message: 'Error interno del servidor' })
     }
   }
 
-  /** Forgot password: genera token y envía enlace /new-password/:token */
+  /** POST /api/v1/forgot-password */
   public async forgotPassword({ request, response }: HttpContext) {
-    const correo = String(request.input('correo') || '')
-      .trim()
-      .toLowerCase()
+    const correo = String(request.input('correo') || '').trim().toLowerCase()
     if (!correo) return response.badRequest({ message: 'correo es requerido' })
 
     const user = await Usuario.findBy('correo', correo)
-    if (!user) {
-      // Podrías responder 200 para no revelar existencia; aquí dejamos feedback explícito
-      return response.badRequest({ message: 'El correo no está registrado.' })
-    }
+    if (!user) return response.badRequest({ message: 'El correo no está registrado.' })
 
     const token = crypto.randomBytes(32).toString('hex')
     const expiresAt = DateTime.now().plus({ hours: 1 })
@@ -69,14 +102,15 @@ export default class AuthController {
     const enlace = `http://localhost:5173/new-password/${token}`
 
     await mail.send((message) => {
-      message.to(correo).from('no-reply@tuapp.com', 'TuApp').subject('Restablece tu contraseña')
+      message
+        .to(correo)
+        .from('no-reply@tuapp.com', 'TuApp')
+        .subject('Restablece tu contraseña')
         .html(`
           <h2>Hola,</h2>
-          <p>Recibimos una solicitud para restablecer tu contraseña.</p>
-          <p>Haz clic en el siguiente enlace para crear una nueva contraseña:</p>
-          <a href="${enlace}" style="display:inline-block;margin-top:1rem;padding:0.75rem 1.5rem;background:#4f46e5;color:#fff;text-decoration:none;border-radius:4px;">Restablecer contraseña</a>
-          <p>Este enlace expira el <strong>${expiresAt.toFormat('yyyy-LL-dd HH:mm')}</strong>.</p>
-          <p>Si no solicitaste este cambio, puedes ignorar este correo.</p>
+          <p>Haz clic para crear una nueva contraseña:</p>
+          <a href="${enlace}">Restablecer contraseña</a>
+          <p>Expira: <strong>${expiresAt.toFormat('yyyy-LL-dd HH:mm')}</strong></p>
         `)
     })
 
@@ -85,7 +119,7 @@ export default class AuthController {
     })
   }
 
-  /** Reset password: valida token no expirado y actualiza password (hook hashea con scrypt) */
+  /** POST /api/v1/reset-password */
   public async resetPassword({ request, response }: HttpContext) {
     const token = String(request.input('token') || '')
     const newPassword = String(request.input('password') || '')
@@ -107,12 +141,9 @@ export default class AuthController {
     }
 
     const user = await Usuario.findBy('correo', resetRecord.correo)
-    if (!user) {
-      return response.badRequest({ message: 'Usuario no encontrado.' })
-    }
+    if (!user) return response.badRequest({ message: 'Usuario no encontrado.' })
 
-    // Asignar en claro: el hook del modelo lo hashea con scrypt al guardar
-    user.password = newPassword
+    user.password = newPassword // hook del modelo la hashea
     await user.save()
     await resetRecord.delete()
 

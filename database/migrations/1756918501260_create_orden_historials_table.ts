@@ -1,9 +1,10 @@
+// database/migrations/xxxx_create_orden_historial.ts
 import { BaseSchema } from '@adonisjs/lucid/schema'
 
-export default class OrdenHistorial extends BaseSchema {
+export default class CreateOrdenHistorial extends BaseSchema {
   protected tableName = 'orden_historial'
 
-  async up() {
+  public async up() {
     this.schema.createTable(this.tableName, (table) => {
       table.increments('id').primary()
 
@@ -20,7 +21,7 @@ export default class OrdenHistorial extends BaseSchema {
       // Estado al que cambió
       table.enum('estado', ['recibido', 'entregado', 'cancelada', 'rechazada']).notNullable()
 
-      // Motivo (solo aplica para cancelada/rechazada, pero lo dejamos nullable)
+      // Motivo (solo aplica para cancelada/rechazada, nullable)
       table
         .integer('motivo_estado_id')
         .unsigned()
@@ -32,19 +33,23 @@ export default class OrdenHistorial extends BaseSchema {
 
       table.text('motivo_texto').nullable()
 
-      // Usuario que hizo el cambio (si luego añades usuarios)
+      // Usuario que hizo el cambio (nullable si sistema)
       table.integer('usuario_id').unsigned().nullable()
+      // Si tienes tabla usuarios y quieres FK:
+      // .references('id').inTable('usuarios').onDelete('SET NULL').onUpdate('CASCADE')
+
+      // Timestamps que usa tu modelo/controlador
+      table.timestamp('created_at', { useTz: true }).notNullable()
+      table.timestamp('updated_at', { useTz: true }).notNullable()
 
       // Índices útiles
-      table.index(['orden_id', 'created_at'])
-      table.index(['motivo_estado_id'])
-
-      // Solo necesitamos created_at como marca temporal del evento
-      table.timestamp('created_at', { useTz: true }).notNullable()
+      table.index(['orden_id', 'created_at'], 'orden_historial_orden_created_idx')
+      table.index(['motivo_estado_id'], 'orden_historial_motivo_idx')
+      table.index(['estado'], 'orden_historial_estado_idx')
     })
   }
 
-  async down() {
+  public async down() {
     this.schema.dropTable(this.tableName)
   }
 }

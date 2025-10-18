@@ -1,9 +1,10 @@
+// database/migrations/xxxx_orden_fotos.ts
 import { BaseSchema } from '@adonisjs/lucid/schema'
 
 export default class OrdenFotos extends BaseSchema {
   protected tableName = 'orden_fotos'
 
-  async up() {
+  public async up() {
     this.schema.createTable(this.tableName, (table) => {
       table.increments('id').primary()
 
@@ -17,20 +18,22 @@ export default class OrdenFotos extends BaseSchema {
         .onDelete('CASCADE')
         .onUpdate('CASCADE')
 
-      // Ruta o clave de almacenamiento
-      table.string('url', 255).notNullable()
+      // URL (más larga para S3/CloudFront/firmadas)
+      table.string('url', 2048).notNullable()
 
-      // Descripción opcional de la foto
-      table.string('descripcion', 160).nullable()
+      // Descripción opcional (usamos TEXT por seguridad)
+      table.text('descripcion').nullable()
 
       // Índices útiles
       table.index(['orden_id'])
 
-      table.timestamp('created_at', { useTz: true }).notNullable()
+      // Timestamps
+      table.timestamp('created_at', { useTz: true }).notNullable().defaultTo(this.now())
+      table.timestamp('updated_at', { useTz: true }).notNullable().defaultTo(this.now())
     })
   }
 
-  async down() {
+  public async down() {
     this.schema.dropTable(this.tableName)
   }
 }

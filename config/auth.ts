@@ -1,45 +1,30 @@
+// config/auth.ts
 import { defineConfig } from '@adonisjs/auth'
 import { tokensGuard, tokensUserProvider } from '@adonisjs/auth/access_tokens'
-import type { InferAuthenticators, InferAuthEvents, Authenticators } from '@adonisjs/auth/types'
-//import { drivers } from '@adonisjs/core/hash'
+import type { Authenticators, InferAuthenticators, InferAuthEvents } from '@adonisjs/auth/types'
 
+/**
+ * Configuración ÚNICA de Auth (OAT)
+ * - Usa el modelo Usuario (singular)
+ * - Se apoya en Usuario.accessTokens (tabla/ajustes definidos en el modelo)
+ */
 const authConfig = defineConfig({
   default: 'api',
+
   guards: {
     api: tokensGuard({
       provider: tokensUserProvider({
-        tokens: 'accessTokens',
-        model: () => import('#models/usuarios'),
+        tokens: 'accessTokens', // <- coincide con Usuario.accessTokens
+        model: () => import('#models/usuario'), // <- ¡singular y alias ts!
       }),
     }),
   },
 })
 
-const autoConfig = {
-  guard: 'api',
-  guards: {
-    api: {
-      driver: 'oat',
-      tokenProvider: {
-        type: 'api',
-        driver: 'database',
-        table: 'login',
-      },
-      provider: {
-        driver: 'lucid',
-        identifierKey: 'id',
-        uids: ['email'],
-        model: () => import('../app/models/usuarios.js'),
-      },
-    },
-  },
-}
-
 export default authConfig
-autoConfig
+
 /**
- * Inferring types from the configured auth
- * guards.
+ * Tipos inferidos
  */
 declare module '@adonisjs/auth/types' {
   export interface Authenticators extends InferAuthenticators<typeof authConfig> {}

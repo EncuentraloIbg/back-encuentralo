@@ -1,79 +1,178 @@
-// backend_soporte/app/controllers/Http/DashboardController.ts
-import { HttpContext } from '@adonisjs/core/http'
-import Ticket from '#models/tickets' // Asegúrate que la ruta sea correcta
-import Usuario from '#models/usuarios' // Ruta correcta a tu modelo Usuario
+// app/controllers/dashboard_controller.ts
+import type { HttpContext } from '@adonisjs/core/http'
 import { DateTime } from 'luxon'
+import Orden from '#models/orden'
+import OrdenHistorial from '#models/orden_historial'
+
+/** Convierte el resultado de .count('* as total') en número seguro */
+function toCount(rows: any[]): number {
+  const v = rows?.[0]?.$extras?.total
+  const n = Number(v)
+  return Number.isFinite(n) ? n : 0
+}
+
+function parseDateOrNull(v?: string) {
+  if (!v) return null
+  const d = DateTime.fromISO(String(v))
+  return d.isValid ? d : null
+}
 
 export default class DashboardController {
-  public async index({ response }: HttpContext) {
-    // La variable 'user' es null por defecto, ya que no estamos usando 'auth' para obtenerla aquí.
-    // const user = null; // <- Esta línea ya no es necesaria si la lógica de tareas pendientes no lo usa.
+  /**
+   * GET /api/v1/dashboard
+   * Query opcionales:
+   *  - razon_social_id: number
+   *  - desde: ISO (YYYY-MM-DD)
+   *  - hasta: ISO (YYYY-MM-DD)
+   */
+  public async index({ request, response }: HttpContext) {
     try {
-      const ESTADO_ABIERTO_ID = 1
-      const ESTADO_CERRADO_ID = 6
-      // 'ESTADOS_PENDIENTES_PARA_TAREA' ha sido eliminada de aquí porque no se usa.
+      const rsId = request.input('razon_social_id')
+        ? Number(request.input('razon_social_id'))
+        : undefined
 
-      // 1.1. Métricas de Tickets
-      const ticketsAbiertosCount = await Ticket.query()
-        .where('estadoId', ESTADO_ABIERTO_ID)
-        .count('* as total')
-      const totalTicketsAbiertos = ticketsAbiertosCount[0].$extras.total
+      const desde = parseDateOrNull(request.input('desde'))
+      const hasta = parseDateOrNull(request.input('hasta'))
+      const rangoDesde = desde ? desde.startOf('day') : null
+      const rangoHasta = hasta ? hasta.endOf('day') : null
 
-      const treintaDiasAtras = DateTime.now().minus({ days: 30 })
-      const ticketsCerradosMesCount = await Ticket.query()
-        .where('estadoId', ESTADO_CERRADO_ID)
-        .where('updatedAt', '>=', treintaDiasAtras.toSQL())
-        .count('* as total')
-      const totalTicketsCerradosMes = ticketsCerradosMesCount[0].$extras.total
+      // Helper para aplicar filtros comunes a queries de Orden
+      const withOrdenFilters = <QB extends ReturnType<typeof Orden.query>>(q: QB): QB => {
+        q.if(!!rsId, (qb) => qb.where('razon_social_id', rsId!))
+        q.if(!!rangoDesde || !!rangoHasta, (qb) => {
+          if (rangoDesde && rangoHasta) {
+            qb.whereBetween('created_at', [rangoDesde.toSQL()!, rangoHasta.toSQL()!])
+          } else if (rangoDesde) {
+            qb.where('created_at', '>=', rangoDesde.toSQL()!)
+          } else if (rangoHasta) {
+            qb.where('created_at', '<=', rangoHasta.toSQL()!)
+          }
+        })
+        return q
+      }
 
-      // 1.2. Métricas de Usuarios (Nuevos Usuarios)
-      const inicioTrimestre = DateTime.now().startOf('quarter')
-      const nuevosUsuariosCount = await Usuario.query()
-        .where('createdAt', '>=', inicioTrimestre.toSQL())
-        .count('* as total')
-      const totalNuevosUsuarios = nuevosUsuariosCount[0].$extras.total
+      // ===== MÉTRICAS =====
+      const pendientesRows = await withOrdenFilters(
+        Orden.query().where('estado', 'recibido').count('* as total')
+      )
+      const pendientes = toCount(pendientesRows)
 
-      // 1.3. Actividad Reciente (Últimos tickets)
-      const actividadReciente = await Ticket.query()
-        .preload('usuarioAsignado')
-        .preload('estado')
-        .preload('empresa')
-        .orderBy('createdAt', 'desc')
-        .limit(5)
+      const hoyIni = DateTime.now().startOf('day')
+      const hoyFin = DateTime.now().endOf('day')
+      const recibidasHoyRows = await withOrdenFilters(
+        Orden.query()
+          .whereBetween('created_at', [hoyIni.toSQL()!, hoyFin.toSQL()!])
+          .count('* as total')
+      )
+      const recibidasHoy = toCount(recibidasHoyRows)
 
-      // =======================================================================
-      // 'tareasPendientes' es un array vacío, ya que no depende de un usuario logueado.
-      // =======================================================================
-      const tareasPendientes: Ticket[] = []
+      const mesIni = DateTime.now().startOf('month')
+      const mesFin = DateTime.now().endOf('month')
+      const recibidasMesRows = await withOrdenFilters(
+        Orden.query()
+          .whereBetween('created_at', [mesIni.toSQL()!, mesFin.toSQL()!])
+          .count('* as total')
+      )
+      const recibidasMes = toCount(recibidasMesRows)
+
+      const hace30 = DateTime.now().minus({ days: 30 })
+      const entregadas30Rows = await withOrdenFilters(
+        Orden.query()
+          .where('estado', 'entregado')
+          .where('updated_at', '>=', hace30.toSQL())
+          .count('* as total')
+      )
+      const entregadasUlt30 = toCount(entregadas30Rows)
+
+      const canceladas30Rows = await withOrdenFilters(
+        Orden.query()
+          .where('estado', 'cancelada')
+          .where('updated_at', '>=', hace30.toSQL())
+          .count('* as total')
+      )
+      const canceladasUlt30 = toCount(canceladas30Rows)
+
+      const rechazadas30Rows = await withOrdenFilters(
+        Orden.query()
+          .where('estado', 'rechazada')
+          .where('updated_at', '>=', hace30.toSQL())
+          .count('* as total')
+      )
+      const rechazadasUlt30 = toCount(rechazadas30Rows)
+
+      // ===== ACTIVIDAD RECIENTE (historial) =====
+      const actividadReciente = await OrdenHistorial.query()
+        .preload('orden', (o) => {
+          o.select(['id', 'codigo', 'estado', 'razon_social_id', 'cliente_id', 'created_at'])
+          o.preload('cliente', (c) => c.select(['id', 'nombre', 'documento']))
+          o.preload('razonSocial', (r) => r.select(['id', 'nombre']))
+          if (rsId) o.where('razon_social_id', rsId)
+        })
+        .orderBy('id', 'desc')
+        .limit(10)
+
+      // ===== ÚLTIMAS ÓRDENES =====
+      const ultimasOrdenes = (await withOrdenFilters(
+        Orden.query()
+          .select(['id', 'codigo', 'estado', 'created_at', 'razon_social_id', 'cliente_id'])
+          .preload('cliente', (c) => c.select(['id', 'nombre', 'documento']))
+          .preload('razonSocial', (r) => r.select(['id', 'nombre']))
+          .orderBy('id', 'desc')
+          .limit(5)
+      )) as Orden[] // <-- tip explícito para evitar "unknown"
 
       return response.ok({
-        metrics: {
-          ticketsAbiertos: totalTicketsAbiertos,
-          ticketsCerradosMes: totalTicketsCerradosMes,
-          nuevosUsuarios: totalNuevosUsuarios,
+        filters: {
+          razon_social_id: rsId ?? null,
+          desde: rangoDesde?.toISO() ?? null,
+          hasta: rangoHasta?.toISO() ?? null,
         },
-        actividadReciente: actividadReciente.map((ticket) => ({
-          id: ticket.id,
-          titulo: ticket.titulo,
-          estado: ticket.estado?.nombre,
-          asignadoA: ticket.usuarioAsignado?.nombre,
-          empresa: ticket.empresa?.nombre,
-          evento: `Ticket #${ticket.id}: ${ticket.titulo} (Estado: ${ticket.estado?.nombre || 'Desconocido'})`,
-          fecha: ticket.createdAt.toRelative(),
+        metrics: {
+          pendientes, // 'recibido'
+          recibidasHoy,
+          recibidasMes,
+          entregadasUlt30,
+          canceladasUlt30,
+          rechazadasUlt30,
+        },
+        actividadReciente: actividadReciente.map((h) => ({
+          id: h.id,
+          estado: h.estado,
+          createdAt: h.createdAt?.toISO() ?? null,
+          createdAtRelative: h.createdAt ? h.createdAt.toRelative() : null,
+          orden: h.orden
+            ? {
+                id: h.orden.id,
+                codigo: h.orden.codigo,
+                estado: h.orden.estado,
+                createdAt: h.orden.createdAt?.toISO() ?? null,
+                // Usa relaciones preloaded directamente; si tus modelos no están tipados, fallback a $preloaded
+                razonSocial:
+                  (h.orden as any)?.razonSocial?.nombre ??
+                  (h.orden as any)?.$preloaded?.razonSocial?.nombre ??
+                  null,
+                cliente:
+                  (h.orden as any)?.cliente?.nombre ??
+                  (h.orden as any)?.$preloaded?.cliente?.nombre ??
+                  null,
+              }
+            : null,
         })),
-        // Si 'tareasPendientes' es un array vacío, este map simplemente devolverá un array vacío, lo cual es correcto.
-        tareasPendientes: tareasPendientes.map((ticket) => ({
-          id: ticket.id,
-          titulo: ticket.titulo,
-          prioridad: ticket.prioridad?.nombre,
-          estado: ticket.estado?.nombre,
-          vence: 'Por definir',
-          detalle: `Vence: ${ticket.prioridad?.nombre || 'Sin Prioridad'}`,
+        ultimasOrdenes: ultimasOrdenes.map((o: Orden) => ({
+          id: o.id,
+          codigo: o.codigo,
+          estado: o.estado,
+          createdAt: o.createdAt?.toISO() ?? null,
+          razonSocial:
+            (o as any)?.razonSocial?.nombre ?? (o as any)?.$preloaded?.razonSocial?.nombre ?? null,
+          cliente: (o as any)?.cliente?.nombre ?? (o as any)?.$preloaded?.cliente?.nombre ?? null,
         })),
       })
     } catch (error) {
-      console.error('Error al obtener datos del dashboard:', error)
-      return response.internalServerError('Error al obtener datos del dashboard')
+      console.error('Error en dashboard:', error)
+      return response.internalServerError({
+        message: 'Error al obtener datos del dashboard',
+      })
     }
   }
 }

@@ -11,31 +11,51 @@ export default class RazonSocial extends BaseModel {
   public static primaryKey = 'id'
 
   @column({ isPrimary: true })
-  declare public id: number
+  declare id: number
 
   @column()
-  declare public nombre: string
+  declare nombre: string
 
-  @column({ columnName: 'prefijo_orden' })
-  declare public prefijoOrden: string
+  @column({ columnName: 'prefijo_orden', serializeAs: 'prefijo_orden' })
+  declare prefijoOrden: string
 
   @column()
-  declare public activo: boolean
+  declare activo: boolean
 
-  @column.dateTime({ autoCreate: true })
-  declare public createdAt: DateTime
+  // ---- Perfil / branding ----
+  @column({ columnName: 'avatar_url', serializeAs: 'avatar_url' })
+  declare avatarUrl: string | null
 
-  @column.dateTime({ autoCreate: true, autoUpdate: true })
-  declare public updatedAt: DateTime
+  @column({ columnName: 'banner_url', serializeAs: 'banner_url' })
+  declare bannerUrl: string | null
 
-  /** Relaciones */
-  @hasMany(() => Cliente, {
-    foreignKey: 'razonSocialId', // DB: razon_social_id
-  })
-  declare public clientes: HasMany<typeof Cliente>
+  @column()
+  declare telefono: string | null
 
-  @hasMany(() => Orden, {
-    foreignKey: 'razonSocialId',
-  })
-  declare public ordenes: HasMany<typeof Orden>
+  @column()
+  declare correo: string | null
+
+  @column()
+  declare direccion: string | null
+
+  @column({ columnName: 'sitio_web', serializeAs: 'sitio_web' })
+  declare sitioWeb: string | null
+
+  @column({ columnName: 'color_hex', serializeAs: 'color_hex' })
+  declare colorHex: string | null
+
+  @column()
+  declare descripcion: string | null
+
+  @column.dateTime({ autoCreate: true, serializeAs: 'created_at' })
+  declare createdAt: DateTime
+
+  @column.dateTime({ autoCreate: true, autoUpdate: true, serializeAs: 'updated_at' })
+  declare updatedAt: DateTime
+
+  @hasMany(() => Cliente, { foreignKey: 'razonSocialId' })
+  declare clientes: HasMany<typeof Cliente>
+
+  @hasMany(() => Orden, { foreignKey: 'razonSocialId' })
+  declare ordenes: HasMany<typeof Orden>
 }

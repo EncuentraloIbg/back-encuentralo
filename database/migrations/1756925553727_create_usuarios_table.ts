@@ -1,4 +1,4 @@
-// database/migrations/xxxx_create_usuarios.ts
+// database/migrations/17579xxxxxxx_create_usuarios_table.ts
 import { BaseSchema } from '@adonisjs/lucid/schema'
 
 export default class extends BaseSchema {
@@ -8,6 +8,7 @@ export default class extends BaseSchema {
     this.schema.createTable(this.tableName, (table) => {
       table.increments('id')
 
+      // Relación con razones_sociales
       table
         .integer('razon_social_id')
         .unsigned()
@@ -23,6 +24,8 @@ export default class extends BaseSchema {
 
       table.string('correo', 255).notNullable().unique().index()
       table.string('password', 255).notNullable()
+
+      table.string('avatar_url', 255).nullable() // 👈 foto/imagen de perfil
 
       table.string('telefono', 50).nullable()
       table.string('direccion', 255).nullable()
